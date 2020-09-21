@@ -1,0 +1,22 @@
+The leukemia dataset is described in the recent paper of Golub el al. [17] and available
+at http://www.genome.wi.mit.edu/MPR. This dataset comes from a study of gene ex-
+pression in two types of acute leukemias: acute lymphoblastic leukemia (ALL) and acute
+myeloid leukemia (AML). Gene expression levels were measured using Aymetrix high-
+density oligonucleotide arrays containing p = 6; 817 human genes. The data comprise 47
+cases of ALL (38 B-cell ALL and 9 T-cell ALL) and 25 cases of AML.
+The following pre-processing steps were applied (personal communication, Pablo Tamayo):
+(i) thresholding: floor of 100 and ceiling of 16,000; (ii) ltering: exclusion of genes with
+max = min  5 and (max−min)  500, where max and min refer respectively to the maxi-
+mum and minimum expression levels of a particular gene across mRNA samples; (iii) base
+10 logarithmic transformation.
+The data are then summarized by a 723571 matrix X = (xij), where xij denotes the base
+10 logarithm of the expression level for gene j in mRNA sample i. Figure 2 displays images
+of the 72  72 correlation matrix between gene expression proles for the 72 tumors.
+13
+In this study, the data are already divided into a learning set of 38 mRNA samples and a test
+set of 34 mRNA samples. The observations in the two sets came from dierent labs and were
+collected at dierent times. The test set is actually more heterogeneous than the learning set
+as it comprises a broader range of samples, including samples from peripheral blood as well
+as bone marrow, from childhood AML patients, and from laboratories that used dierent
+sample preparation protocols. In Section 6 we address the impact of this heterogeneity on
+the performance of the predictors.
