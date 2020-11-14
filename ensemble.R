@@ -10,7 +10,8 @@ library(plsgenomics)
 #library(penalized)
 library(glmnet)
 library(ROCR)
-
+library(descr)
+library(plotrix)
 source("validation.R")
 source("miscellaneous.R")
 
@@ -18,8 +19,8 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
                                boost=NULL,
     algorithms=c("svm", "rf", "lda", "qda", "lr", "nnet", "pls_lda", "pls_qda", "pls_rf", "pls_lr",
                     "pca_lda", "pca_qda", "pca_rf", "pca_lr", "rpart", "adaboost", "plr", "pls"), 
-    validation=c("accuracy", "sensitivity", "specificity"), progress=NULL,fold=NULL, step=NULL,
-    ncomp=5, nunits=3, lambda1=5, kernel="radial",
+    validation=c("accuracy", "sensitivity", "specificity"), progress=NULL,status=NULL,fold=NULL, step=NULL,cbutton=NULL,
+    flagMult=FALSE,flagTwo=FALSE, ncomp=3, nunits=3, lambda1=5, kernel="radial",
     distance="Spearman", weighted=TRUE, verbose=TRUE, seed=NULL, ...){
 
     rownames(x) <- NULL # to suppress the warning message about duplicate rownames
@@ -33,15 +34,34 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
     # error on p >> N for classical methods
     if(nrow(x) < ncol(x))
         if(length(intersect(algorithms, c("lda", "qda", "lr"))) > 0)
-            stop("LDA, QDA and LR cannot be used if nrow(x) < ncol(x) (p > N)")
+        {
+          svalue(status) <-
+            "LDA, QDA and LR cannot be used if nrow(x) < ncol(x) (p > N)"
+            return(NULL)
+        }
 
     n <- length(y)
     nalg <- length(algorithms)
     nvm <- length(validation)
     ly <- levels(y)
-
+    
+    vrem=min(table(y))
+    if(vrem<5)
+    {
+      svalue(status)<-"The smallest class has less than 8 elements"
+      return(NULL)
+    }
     if(length(ly) == 2 && all(ly != c("0","1")))
-        stop("For binary classification, levels in y must be 0 and 1")
+    {
+      svalue(status)="For binary classification, levels in y must be 0 and 1"
+      return(NULL)
+    }
+    
+    if(length(ly) >2 && any(algorithms%in%c("pls_lr","pca_lr","lr")))
+    {
+      svalue(status)="Some algorithms are impossible for multinomial classification"
+      return(NULL)
+    }
 
     fittedModels <- list() #to keep the fitted algorithms
     fittedBoost<-list()
@@ -52,6 +72,9 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
 	    fam="binomial"
 #--------- for progress bar--------------
     for(k in 1:M){
+      if(svalue(cbutton)=="Stopping..."){
+         return(NULL)
+      }
       if(!is.null(progress))
       {
         ind<-(fold-1)*M+k
@@ -71,10 +94,10 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
 #-----------------------------------      
         repeat{ # to make sure that at least two classes are present 
             s <- sample(n, replace=TRUE)
-            if(length(table(y[s])) >= 2 & length(table(y[-s])) >= 2)
+            vrem=min(table(y[s]))
+            if(length(table(y[s])) >= 2 & length(table(y[-s])) >= 2 & vrem>=5)
                 break
         }
-        
         if(rfs) # perform feature selection?
             fs <- sample(1:ncol(x), nf)  else
             fs <- 1:ncol(x)
@@ -88,7 +111,10 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
         if("pls_lda" %in% algorithms || "pls_qda" %in% algorithms || "pls_rf" %in% algorithms ||
                 "pls_lr" %in% algorithms){
             if(ncomp >= ncol(x))
-                stop("Decrease ncomp for the PLS models; must be smaller than ncol(x)")
+            {
+               svalue(status)<-"Decrease ncomp for the PLS models; must be smaller than ncol(x)"
+               return(NULL)
+            }
             fpr <- pls.regression(training, transformy(trainY), ncomp=ncomp)
             plsX <- scale(training, scale=FALSE, center=fpr$meanX)%*%fpr$R
             plsTestX <- scale(testing, scale=FALSE, center=fpr$meanX)%*%fpr$R
@@ -98,7 +124,10 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
         if("pca_lda" %in% algorithms || "pca_qda" %in% algorithms || "pca_rf" %in% algorithms ||
                 "pca_lr" %in% algorithms){
             if(ncomp >= ncol(x))
-                stop("Decrease ncomp for the PLS models; must be smaller than ncol(x)")
+            {
+               svalue(status)="Decrease ncomp for the PLS models; must be smaller than ncol(x)"
+               return(NULL)
+            }
             pcaX <- prcomp(training)$x[,1:ncomp]
             pcaTestX <- prcomp(testing)$x[,1:ncomp]
         }        
@@ -111,7 +140,7 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
                 "svm"      = svm(training, trainY, probability=TRUE, kernel=kernel, ...),
                 "rf"       = randomForest(training, trainY, ...),
                 "lda"      = lda(training, trainY, ...),
-                "qda"      = qda(training, trainY, ...),
+                "qda"      = proc_qda(training, trainY,...),#qda(training, trainY, ...),
                 "lr"       = glm(y~., family=binomial, data=data.frame(y=trainY, x=training), ...),
                 "plr"      = {
                               out=createFolds(trainY, k = 10, list = F, returnTrain = F)
@@ -121,27 +150,46 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
                               lambda = cv.lasso$lambda.min)
                               },#penalized(trainY, penalized=training, trace=T, model="logistic", lambda1=lambda1, ...),
                 "pls_lda"  = lda(plsX, trainY, ...),
-                "pls_qda"  = qda(plsX, trainY, ...),
+                "pls_qda"  = proc_qda(plsX, trainY,...),#qda(plsX, trainY, ...),
                 "pls_rf"   = randomForest(plsX, trainY, ...),
                 "pls_lr"   = glm(y~., family=binomial, data=data.frame(y=trainY, x=plsX), ...),
                 "pca_lda"  = lda(pcaX, trainY, ...),
-                "pca_qda"  = qda(pcaX, trainY, ...),
+                "pca_qda"  = proc_qda(pcaX, trainY,...),#qda(pcaX, trainY, ...),
                 "pca_rf"   = randomForest(pcaX, trainY, ...),
                 "pca_lr"   = glm(y~., family=binomial, data=data.frame(y=trainY, x=pcaX), ...),              
                 "nnet"     = nnet(training, class.ind(trainY), size=nunits, trace=FALSE, ...),
                 "rpart"    = rpart(y~., data=data.frame(y=trainY, training), ...),
-                "adaboost" = adaboost.M1(y~., data=data.frame(y=trainY, training), ...),
+                "adaboost" = boosting(y~., data=data.frame(y=trainY, training),mfinal=3, ...),
                 "pls"      = pls.regression(training, transformy(trainY), ncomp=ncomp, ...)
             )
-            attr(Res[[j]], "algorithm") <- algorithms[j]
             if("pls_lda" == algorithms[j] || "pls_qda" == algorithms[j] || "pls_rf" == algorithms[j] ||
                    "pls_lr" == algorithms[j]){
+                if("pls_qda" == algorithms[j])
+                {
+                  vrem=Res[[j]]$res
+                  Res[[j]]=Res[[j]]$out
+                  attr(Res[[j]], "Feature") <- vrem
+                }
                 attr(Res[[j]], "meanX") <- fpr$meanX
                 attr(Res[[j]], "R") <- fpr$R
             }
+            if("qda" == algorithms[j])
+            {
+              vrem=Res[[j]]$res
+              Res[[j]]=Res[[j]]$out
+              attr(Res[[j]], "Feature") <- vrem
+            }
             if("pca_lda" == algorithms[j] || "pca_qda" == algorithms[j] || "pca_rf" == algorithms[j] ||
-                   "pca_lr" == algorithms[j])
+                   "pca_lr" == algorithms[j]){
+                if("pca_qda" == algorithms[j])
+                {
+                  vrem=Res[[j]]$res
+                  Res[[j]]=Res[[j]]$out
+                  attr(Res[[j]], "Feature") <- vrem
+                }
                 attr(Res[[j]], "ncomp") <- ncomp
+            }
+            attr(Res[[j]], "algorithm") <- algorithms[j]
             #cat(algorithms[j], "\n")
         }
         
@@ -161,22 +209,31 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
                 "lda"       = {predicted[[j]] <- predict(Res[[j]], testing)$class
                                 temp <- predict(Res[[j]], testing)$posterior
                                 probabilities[[j]] <- temp[,which(colnames(temp) == "1")]},
-                "qda"       = {predicted[[j]] <- predict(Res[[j]], testing)$class
-                                temp <- predict(Res[[j]], testing)$posterior
+                "qda"       = {predicted[[j]] <- predict(Res[[j]], testing[,!attr(Res[[j]], "Feature"),drop=F])$class
+                                temp <- predict(Res[[j]], testing[,!attr(Res[[j]], "Feature"),drop=F])$posterior
                                 probabilities[[j]] <- temp[,which(colnames(temp) == "1")]},
                 "lr"        = {probabilities[[j]] <- predict(Res[[j]], data.frame(x=testing), type="response")
                                 temp <- probabilities[[j]] > .5
                                 temp[temp] <- 1
                                 predicted[[j]] <- factor(temp)},
                 "plr"       = {probabilities[[j]] <- predict(Res[[j]], testing,type="response")
-                                temp <- probabilities[[j]] > .5
-                                temp[temp] <- 1
-                                predicted[[j]] <- factor(temp)},
+                                if(flagMult&&!flagTwo)
+                                {
+                                  tt=apply(probabilities[[j]],1,which.max)
+                                  predicted[[j]] <- factor(colnames(probabilities[[j]])[tt])
+                                  probabilities[[j]] <- probabilities[[j]][,which(colnames(probabilities[[j]]) == "1"),]
+                                }
+                                else
+                                {
+                                  temp <- probabilities[[j]] > .5
+                                  temp[temp] <- 1
+                                  predicted[[j]] <- factor(temp)
+                                }},
                 "pls_lda"   = {predicted[[j]] <- predict(Res[[j]], plsTestX)$class
                                 temp <- predict(Res[[j]], plsTestX)$posterior
                                 probabilities[[j]] <- temp[,which(colnames(temp) == "1")]},
-                "pls_qda"   = {predicted[[j]] <- predict(Res[[j]], plsTestX)$class
-                                temp <- predict(Res[[j]], plsTestX)$posterior
+                "pls_qda"   = {predicted[[j]] <- predict(Res[[j]], plsTestX[,!attr(Res[[j]], "Feature"),drop=F])$class
+                                temp <- predict(Res[[j]], plsTestX[,!attr(Res[[j]], "Feature"),drop=F])$posterior
                                 probabilities[[j]] <- temp[,which(colnames(temp) == "1")]},
                 "pls_lr"    = {probabilities[[j]] <- predict(Res[[j]], data.frame(x=plsTestX), type="response")
                                 temp <- probabilities[[j]] > .5
@@ -188,8 +245,8 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
                 "pca_lda"   = {predicted[[j]] <- predict(Res[[j]], pcaTestX)$class
                                 temp <- predict(Res[[j]], pcaTestX)$posterior
                                 probabilities[[j]] <- temp[,which(colnames(temp) == "1")]},
-                "pca_qda"   = {predicted[[j]] <- predict(Res[[j]], pcaTestX)$class
-                                temp <- predict(Res[[j]], pcaTestX)$posterior
+                "pca_qda"   = {predicted[[j]] <- predict(Res[[j]], pcaTestX[,!attr(Res[[j]], "Feature"),drop=F])$class
+                                temp <- predict(Res[[j]], pcaTestX[,!attr(Res[[j]], "Feature"),drop=F])$posterior
                                 probabilities[[j]] <- temp[,which(colnames(temp) == "1")]},
                 "pca_lr"    = {probabilities[[j]] <- predict(Res[[j]], data.frame(x=pcaTestX), type="response")
                                 temp <- probabilities[[j]] > .5
@@ -209,9 +266,8 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
                 "pls"       = {predicted[[j]] <- predict.pls(Res[[j]], newdata=testing)$class
                 				probabilities[[j]] <- predict.pls(Res[[j]], newdata=testing)$probs}
             )
-          #cat(algorithms[j], "\n")
+          cat(algorithms[j], "\n")
           }
-
         # compute validation measures           
         scores <- matrix(0, nalg, nvm)
         rownames(scores) <- algorithms
@@ -239,7 +295,7 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
           if(weighted)
             fittedModels[[k]] <- Res[[which(algorithms == BruteAggreg(convScores$ranks,
                                                                       nalg, convScores$weights, distance=distance)$top.list[1])]]
-        else
+          else
           fittedModels[[k]] <- Res[[which(algorithms == BruteAggreg(convScores$ranks, nalg,
                                                                     distance=distance)$top.list[1])]]
         else if(nvm > 1 && nalg > 6)
@@ -281,15 +337,23 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
 							"svm"       = predicted[,i] <- predict(fittedModels[[k]], testing, prob=TRUE),
 							"rf"        = predicted[,i] <- predict(fittedModels[[k]], testing, type="class"),
 							"lda"       = predicted[,i] <- predict(fittedModels[[k]], testing)$class,
-							"qda"       = predicted[,i] <- predict(fittedModels[[k]], testing)$class,
+							"qda"       = predicted[,i] <- predict(fittedModels[[k]], testing[,!attr(fittedModels[[k]], "Feature"),drop=F])$class,
 							"lr"        = {temp <- predict(fittedModels[[k]], data.frame(x=testing), type="response")
 											temp <- temp > .5
 											temp[temp] <- 1
 											predicted[,i] <- factor(temp)},
 							"plr"       = {temp <- predict(fittedModels[[k]], testing,type="response")
-											temp <- temp > .5
-											temp[temp] <- 1
-											predicted[,i] <- factor(temp)},                     
+        							if(flagMult&&!flagTwo)
+        							{
+        							  tt=apply(temp,1,which.max)
+        							  predicted[,i] <- factor(colnames(temp)[tt])
+        							}
+        							else
+        							{
+        							  temp <- temp > .5
+        							  temp[temp] <- 1
+        							  predicted[,i] <- factor(temp)
+        							}},
 							"nnet"      = predicted[,i] <- predictNNET(fittedModels[[k]], testing), # custom fn defined above
 							"rpart"     = predicted[,i] <- predict(fittedModels[[k]], newdata=data.frame(testing), type="class"),
 							"adaboost"  = predicted[,i] <- predict.boost(fittedModels[[k]], newdata=data.frame(testing))$class,
@@ -331,7 +395,10 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
         if("pls_lda" %in% algorithms || "pls_qda" %in% algorithms || "pls_rf" %in% algorithms ||
                 "pls_lr" %in% algorithms){
             if(ncomp >= ncol(x))
-                stop("Decrease ncomp for the PLS models; must be smaller than ncol(x)")
+            {
+               svalue(status)<-"Decrease ncomp for the PLS models; must be smaller than ncol(x)"
+               return(NULL)
+            }
             fpr <- pls.regression(x, transformy(y), ncomp=ncomp)
             plsX <- scale(x, scale=FALSE, center=fpr$meanX)%*%fpr$R
         }
@@ -340,7 +407,10 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
         if("pca_lda" %in% algorithms || "pca_qda" %in% algorithms || "pca_rf" %in% algorithms ||
                 "pca_lr" %in% algorithms){
             if(ncomp >= ncol(x))
-                stop("Decrease ncomp for the PLS models; must be smaller than ncol(x)")
+            {
+              svalue(status)<-"Decrease ncomp for the PLS models; must be smaller than ncol(x)"
+              return(NULL)
+            }
             pcaX <- prcomp(x)$x[,1:ncomp]
         }            
          
@@ -352,7 +422,7 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
                 "svm"      = svm(training, trainY, probability=TRUE, kernel=kernel, ...),
                 "rf"       = randomForest(training, trainY, ...),
                 "lda"      = lda(training, trainY, ...),
-                "qda"      = qda(training, trainY, ...),
+                "qda"      = proc_qda(training, trainY,...),
                 "lr"       = glm(y~., family=binomial, data=data.frame(y=trainY, x=training), ...),
                 "plr"      = {
                             out=createFolds(trainY, k = 10, list = F, returnTrain = F)
@@ -361,36 +431,56 @@ ensembleClassifier <- function(x, y, M=51, fit.individual=TRUE, varimp=FALSE, rf
                             glmnet(training, trainY, alpha = 1, family = fam,intercept = F,
                             lambda = cv.lasso$lambda.min)},#penalized(trainY, penalized=training, trace=FALSE, model="logistic", lambda1=lambda1, ...),
                 "pls_lda"  = lda(plsX, trainY, ...),
-                "pls_qda"  = qda(plsX, trainY, ...),
+                "pls_qda"  = proc_qda(plsX, trainY,...),
                 "pls_rf"   = randomForest(plsX, trainY, ...),
                 "pls_lr"   = glm(y~., family=binomial, data=data.frame(y=trainY, x=plsX), ...),
                 "pca_lda"  = lda(pcaX, trainY, ...),
-                "pca_qda"  = qda(pcaX, trainY, ...),
+                "pca_qda"  = proc_qda(pcaX, trainY,...),
                 "pca_rf"   = randomForest(pcaX, trainY, ...),
                 "pca_lr"   = glm(y~., family=binomial, data=data.frame(y=trainY, x=pcaX), ...),              
                 "nnet"     = nnet(training, class.ind(trainY), size=nunits, trace=FALSE, ...),
                 "rpart"    = rpart(y~., data=data.frame(y=trainY, training), ...),
-                "adaboost" = adaboost.M1(y~., data=data.frame(y=trainY, training), ...),
+                "adaboost" = boosting(y~., data=data.frame(y=trainY, training),mfinal=3, ...),
                 "pls"      = pls.regression(training, transformy(trainY), ncomp=ncomp, ...)                
             )
-            attr(Res[[j]], "algorithm") <- algorithms[j]
             if("pls_lda" == algorithms[j] || "pls_qda" == algorithms[j] || "pls_rf" == algorithms[j] ||
                     "pls_lr" == algorithms[j]){
+              if("pls_qda" == algorithms[j])
+              {
+                vrem=Res[[j]]$res
+                Res[[j]]=Res[[j]]$out
+                attr(Res[[j]], "Feature") <- vrem
+              }
                 attr(Res[[j]], "meanX") <- fpr$meanX
                 attr(Res[[j]], "R") <- fpr$R
             }
+            if("qda" == algorithms[j])
+            {
+              vrem=Res[[j]]$res
+              Res[[j]]=Res[[j]]$out
+              attr(Res[[j]], "Feature") <- vrem
+            }
             if("pca_lda" == algorithms[j] || "pca_qda" == algorithms[j] || "pca_rf" == algorithms[j] ||
-                   "pca_lr" == algorithms[j])
-                attr(Res[[j]], "ncomp") <- ncomp            
+                   "pca_lr" == algorithms[j]){
+                if("pca_qda" == algorithms[j])
+                {
+                  vrem=Res[[j]]$res
+                  Res[[j]]=Res[[j]]$out
+                  attr(Res[[j]], "Feature") <- vrem
+                }
+                attr(Res[[j]], "ncomp") <- ncomp 
+            }
+            attr(Res[[j]], "algorithm") <- algorithms[j]
         }
     }       
     res <- list(models = fittedModels, indModels = Res, boost=fittedBoost,rawImportance=rawImportance, M = M, 
-		bestAlg = bestAlg, levels=ly, importance=varImportance)#,convScores=convScores)
+                bestAlg = bestAlg, levels=ly, importance=varImportance)#,convScores=convScores)
     class(res) <- "ensemble"
     res
 }
             
-predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NULL,flagMult=FALSE){
+predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NULL,graph1=NULL,
+                       flagMult=FALSE,flagTwo=FALSE){
     M <- EnsObject$M
     n <- nrow(newdata)
     predicted <- matrix(0, n, M)
@@ -409,6 +499,11 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
             R <- attr(test_models[[i]], "R")
             meanX <- attr(test_models[[i]], "meanX")
             plsTestX <- scale(testing, scale=FALSE, center=meanX)%*%R
+            # if(attr(test_models[[i]], "algorithm") %in% "pls_qda")
+            # {
+            #   Feature <- attr(test_models[[i]], "Feature")
+            #   plsTestX<-plsTestX[,!Feature]
+            # }
         }
         if(attr(test_models[[i]], "algorithm") %in% c("pca_lda", "pca_qda", "pca_rf", "pca_lr")){
             pcaTestX <- prcomp(testing)$x[,1:as.numeric(attr(test_models[[i]], "ncomp"))]
@@ -418,24 +513,32 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
                 "svm"       = predicted[,i] <- predict(test_models[[i]], testing, prob=TRUE),
                 "rf"        = predicted[,i] <- predict(test_models[[i]], testing, type="class"),
                 "lda"       = predicted[,i] <- predict(test_models[[i]], testing)$class,
-                "qda"       = predicted[,i] <- predict(test_models[[i]], testing)$class,
+                "qda"       = predicted[,i] <- predict(test_models[[i]], testing[,!attr(test_models[[i]], "Feature"),drop=F])$class,
                 "lr"        = {temp <- predict(test_models[[i]], data.frame(x=testing), type="response")
                                 temp <- temp > .5
                                 temp[temp] <- 1
                                 predicted[,i] <- factor(temp)},
                 "plr"       = {temp <- predict(test_models[[i]], testing,type="response")
-                                temp <- temp > .5
-                                temp[temp] <- 1
-                                predicted[,i] <- factor(temp)},
+                                if(flagMult&&!flagTwo)
+                                {
+                                  tt=apply(temp,1,which.max)
+                                  predicted[,i] <- factor(colnames(temp)[tt])
+                                }
+                                else
+                                {
+                                  temp <- temp > .5
+                                  temp[temp] <- 1
+                                  predicted[,i] <- factor(temp)
+                                }},
                 "pls_lda"   = predicted[,i] <- predict(test_models[[i]], plsTestX)$class,
-                "pls_qda"   = predicted[,i] <- predict(test_models[[i]], plsTestX)$class,
+                "pls_qda"   = predicted[,i] <- predict(test_models[[i]], plsTestX[,!attr(test_models[[i]], "Feature"),drop=F])$class,
                 "pls_lr"    = {temp <- predict(test_models[[i]], data.frame(x=plsTestX), type="response")
                                 temp <- temp > .5
                                 temp[temp] <- 1
                                 predicted[,i] <- factor(temp)},
                 "pls_rf"    = predicted[,i] <- predict(test_models[[i]], plsTestX, type="class"),
                 "pca_lda"   = predicted[,i] <- predict(test_models[[i]], pcaTestX)$class,
-                "pca_qda"   = predicted[,i] <- predict(test_models[[i]], pcaTestX)$class,
+                "pca_qda"   = predicted[,i] <- predict(test_models[[i]], pcaTestX[,!attr(test_models[[i]], "Feature"),drop=F])$class,
                 "pca_lr"    = {temp <- predict(test_models[[i]], data.frame(x=pcaTestX), type="response")
                                 temp <- temp > .5
                                 temp[temp] <- 1
@@ -451,7 +554,7 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
     predicted <- predicted - 1
     
     # class probabilities by majority
-    if(flagMult)
+    if(flagMult&&!flagTwo)
     {
       newclass <- factor(apply(predicted, 1, function(x) as.numeric(names(which.max(table(x))))), levels=EnsObject$levels)
       probabilities <- apply(predicted, 1, function(x) max(table(x))/M)
@@ -462,6 +565,17 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
         ensemblePerformance <- matrix(c(acc),1,1)
         colnames(ensemblePerformance) <- valM
         rownames(ensemblePerformance) <- "ensemble"
+        if(!is.null(graph1))
+          visible(graph1)<-TRUE
+        ct <- crosstab(y, newclass,dnn = c("True", "Predicted"),plot=F,drop.levels=F)
+        ct<-t(ct$tab)
+        cat(ct)
+        # barp(ct,main="Crosstabulation",ylab="Value",
+        #         names.arg=colnames(ct),col=2:(1+length(levels(y))),ylim=c(0,max(ct)+4))
+        barp(ct,main="Crosstabulation",ylab="Value",
+                  names.arg=colnames(ct),col=2:(1+ncol(ct)),ylim=c(0,max(ct)+4))
+        addtable2plot(x="topright",y=NULL,ct,bty="o",display.rownames=TRUE,hlines=TRUE,
+                      vlines=TRUE,title="The table",cex=1,xpad=0.3)
       }
     }
     else
@@ -482,16 +596,24 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
           ensemblePerformance <- matrix(c(acc, sens, spec, auc,perf@y.values[[1]]),1,5)
           colnames(ensemblePerformance) <- valM
           rownames(ensemblePerformance) <- "ensemble"
+          if(!is.null(graph1))
+            visible(graph1)<-TRUE
+          ct <- crosstab(y, newclass,dnn = c("True", "Predicted"),plot=F,drop.levels=F)
+          ct<-t(ct$tab)
+          barp(ct,main="Crosstabulation",ylab="Value",
+               names.arg=colnames(ct),col=2:(1+ncol(ct)),ylim=c(0,max(ct)+4))
+          addtable2plot(x="topright",y=NULL,ct,bty="o",display.rownames=TRUE,hlines=TRUE,
+                        vlines=TRUE,title="The table",cex=1,xpad=0.3)
       }
     }
-
-    
+ 
     #############################################################################
     # predict using individual models
     #############################################################################
     if(length(EnsObject$indModels) > 0){  
        indPred <- matrix(0, nrow(newdata), length(EnsObject$indModels))
        indProb <- matrix(0, nrow(newdata), length(EnsObject$indModels))
+       indResult<-matrix(0, nrow(newdata), length(EnsObject$indModels))
        testing <- newdata
        
        for(i in 1:length(EnsObject$indModels)){
@@ -500,6 +622,11 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
                 R <- attr(EnsObject$indModels[[i]], "R")
                 meanX <- attr(EnsObject$indModels[[i]], "meanX")
                 plsTestX <- scale(testing, scale=FALSE, center=meanX)%*%R
+                # if(attr(EnsObject$indModels[[i]], "algorithm") %in% "pls_qda")
+                # {
+                #   Feature <- attr(EnsObject$indModels[[i]], "Feature")
+                #   plsTestX<-plsTestX[,!Feature]
+                # }
             }
             if(attr(EnsObject$indModels[[i]], "algorithm") %in% c("pca_lda", "pca_qda", "pca_rf", "pca_lr")){
                 pcaTestX <- prcomp(testing)$x[,1:as.numeric(attr(EnsObject$indModels[[i]], "ncomp"))]
@@ -515,22 +642,32 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
                 "lda"       = {indPred[,i] <- predict(EnsObject$indModels[[i]], testing)$class
                                 temp <- predict(EnsObject$indModels[[i]], testing)$posterior
                                 indProb[,i] <- temp[,which(colnames(temp) == "1")]},
-                "qda"       = {indPred[,i] <- predict(EnsObject$indModels[[i]], testing)$class
-                                temp <- predict(EnsObject$indModels[[i]], testing)$posterior
+                "qda"       = {indPred[,i] <- predict(EnsObject$indModels[[i]], testing[,!attr(EnsObject$indModels[[i]], "Feature"),drop=F])$class
+                                temp <- predict(EnsObject$indModels[[i]], testing[,!attr(EnsObject$indModels[[i]], "Feature"),drop=F])$posterior
                                 indProb[,i] <- temp[,which(colnames(temp) == "1")]},
                 "lr"        = {indProb[,i] <- predict(EnsObject$indModels[[i]], data.frame(x=testing), type="response")
                                 temp <- indProb[,i] > .5
                                 temp[temp] <- 1
                                 indPred[,i] <- factor(temp)},
-                "plr"       = {indProb[,i] <- predict(EnsObject$indModels[[i]], testing,type="response")
-                                temp <- indProb[,i] > .5
-                                temp[temp] <- 1
-                                indPred[,i] <- factor(temp)},
+                "plr"       = {vrem <- predict(EnsObject$indModels[[i]], testing,type="response")
+                                if(flagMult&&!flagTwo)
+                                {
+                                  tt=apply(vrem,1,which.max)
+                                  indPred[,i] <- factor(colnames(vrem)[tt])
+                                  indProb[,i] <- vrem[,which(colnames(vrem) == "1"),]
+                                }
+                                else
+                                {
+                                  indProb[,i]=vrem
+                                  temp <- indProb[,i] > .5
+                                  temp[temp] <- 1
+                                  indPred[,i] <- factor(temp)
+                                }},
                 "pls_lda"   = {indPred[,i] <- predict(EnsObject$indModels[[i]], plsTestX)$class
                                 temp <- predict(EnsObject$indModels[[i]], plsTestX)$posterior
                                 indProb[,i] <- temp[,which(colnames(temp) == "1")]},
-                "pls_qda"   = {indPred[,i] <- predict(EnsObject$indModels[[i]], plsTestX)$class
-                                temp <- predict(EnsObject$indModels[[i]], plsTestX)$posterior
+                "pls_qda"   = {indPred[,i] <- predict(EnsObject$indModels[[i]], plsTestX[,!attr(EnsObject$indModels[[i]], "Feature"),drop=F])$class
+                                temp <- predict(EnsObject$indModels[[i]], plsTestX[,!attr(EnsObject$indModels[[i]], "Feature"),drop=F])$posterior
                                 indProb[,i] <- temp[,which(colnames(temp) == "1")]},
                 "pls_lr"    = {indProb[,i] <- predict(EnsObject$indModels[[i]], data.frame(x=plsTestX), type="response")
                                 temp <- indProb[,i] > .5
@@ -542,8 +679,8 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
                 "pca_lda"   = {indPred[,i] <- predict(EnsObject$indModels[[i]], pcaTestX)$class
                                 temp <- predict(EnsObject$indModels[[i]], pcaTestX)$posterior
                                 indProb[,i] <- temp[,which(colnames(temp) == "1")]},
-                "pca_qda"   = {indPred[,i] <- predict(EnsObject$indModels[[i]], pcaTestX)$class
-                                temp <- predict(EnsObject$indModels[[i]], pcaTestX)$posterior
+                "pca_qda"   = {indPred[,i] <- predict(EnsObject$indModels[[i]], pcaTestX[,!attr(EnsObject$indModels[[i]], "Feature"),drop=F])$class
+                                temp <- predict(EnsObject$indModels[[i]], pcaTestX[,!attr(EnsObject$indModels[[i]], "Feature"),drop=F])$posterior
                                 indProb[,i] <- temp[,which(colnames(temp) == "1")]},
                 "pca_lr"    = {indProb[,i] <- predict(EnsObject$indModels[[i]], data.frame(x=pcaTestX), type="response")
                                 temp <- indProb[,i] > .5
@@ -572,7 +709,7 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
             rownames(indPerformance) <- unlist(sapply(EnsObject$indModels, FUN = function(x) attr(x, "algorithm")))
             colnames(indPerformance) <- valM
 
-            if(flagMult)
+            if(flagMult&&!flagTwo)
               numfun=1
             else
               numfun=5
@@ -593,7 +730,7 @@ predictEns <- function(EnsObject, newdata, y=NULL, flag=TRUE,plot=TRUE,graph=NUL
     else
         if(length(EnsObject$indModels) > 0)
             res <- list(yhat=newclass, prob=probabilities, pred=predicted, ensemblePerf=ensemblePerformance,
-                    indPerf=indPerformance)
+                    indPerf=indPerformance,indPred=indPred,indProb=indProb)
         else
             res <- list(yhat=newclass, prob=probabilities, pred=predicted, ensemblePerf=ensemblePerformance)
     class(res) <- "predictEnsemble"
