@@ -1,3 +1,27 @@
+proc_qda<-function(X,Y)
+{
+  var=unique(Y)
+  fe<-sapply(var, function(z){apply(X[Y==z,],2,function(x) {out<-unique(x);
+        res<-length(out)<=1;res})})
+  res<-apply(fe,1,any)
+  matr<-rep(TRUE,ncol(X))
+  
+  tmp <- sapply(var,function(z) {out=cor(X[Y==z,!res]);out[upper.tri(out)] <- 0;
+              diag(out) <- 0;apply(out,2,function(x) any(abs(x) > 0.7))})
+  res1<-apply(tmp,1,any)
+  matr[!res]=res1
+  data.new <- X[,!matr,drop=FALSE]
+  cat(matr,"\n")
+  #
+  tryCatch(
+    {
+      out<-qda(data.new, Y)
+    },
+    error = function(e) {cat("Rank deficiency:\n",matr,"\n",table(Y))}
+  )
+  return(list(out=out,res=matr))
+}
+
 transformy_ver<-function(y)
 {
   y<-as.numeric(y)
