@@ -1,3 +1,4 @@
+aaaaaa
 accuracy <- function(truth, predicted)
     if(length(truth) > 0)
         sum(truth==predicted)/length(truth) else    
